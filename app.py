@@ -43,6 +43,18 @@ final 为最后一行有效推算后的针数（全部通过时即最终针数�
 可用针数，倍数保持正整数，原本正确的尺码不受影响。候选按（改动的尺码
 项数, 倍数变化总量, 原文位置）升序排列，首条放入响应顶层的 "suggestion"
 （不改变原有结果字段）；无解或没有针数差额时 suggestion 为 null。
+
+POST /api/move-size       尺码上移/下移（相邻交换）
+  请求: {"sizes": [{"name", "cast_on"}, ...], "pattern": "...",
+         "index": 1, "direction": "up"|"down"}
+  成功响应: {"ok": true, "sizes": 重排后的尺码列表, "pattern": 重排后的指令}
+  失败响应: {"ok": false, "error": {"type": "reorder"|"sizes"|"move",
+                  "line"?, "char"?, "message"}}
+  按尺码原顺序建立“新位置 -> 原位置”的映射，同步重排指令每个非空行中
+  每一处 *{...} 的倍数项（嵌套重复与同一行多处均包含），普通 *n 与其他
+  原文保持不变。移动前先按当前尺码数解析每行：任一行的按尺码倍数项数或
+  数值非法（或整行无法解析）时整次移动不生效，错误给出原文行号与字符
+  位置。重排后还会逐行复核各尺码的消耗/产出针数与移动前完全一致。
 """
 
 import math
@@ -56,6 +68,7 @@ from stitch_parser import (
     ParseError,
     parse_row,
     parse_row_details,
+    reorder_line_size_multipliers,
     suggest_row_fix,
 )
 
@@ -357,6 +370,122 @@ def validate_sizes():
         "ok": all(s["ok"] for s in result_sizes),
         "sizes": result_sizes,
         "suggestion": suggestion,
+    })
+
+
+def _reorder_error(error_type, message, lineno=None, exc=None):
+    """构造尺码移动失败错误对象；解析异常附带原文行号与字符位置（1 起）。"""
+    err = {"type": error_type, "message": message}
+    if lineno is not None:
+        err["line"] = lineno
+    if exc is not None and getattr(exc, "pos", None) is not None:
+        err["char"] = exc.pos + 1
+    return err
+
+
+@app.post("/api/move-size")
+def move_size():
+    data = request.get_json(silent=True) or {}
+
+    sizes, err = _parse_sizes(data.get("sizes"))
+    if err:
+        return jsonify({
+            "ok": False,
+            "error": {"type": "sizes", "message": err},
+        })
+
+    direction = data.get("direction")
+    if direction not in ("up", "down"):
+        return jsonify({
+            "ok": False,
+            "error": {"type": "move",
+                      "message": "direction 必须为 \"up\"（上移）或 \"down\"（下移）"},
+        })
+
+    raw_index = data.get("index")
+    if isinstance(raw_index, bool) or not isinstance(raw_index, (int, str)) or (
+            isinstance(raw_index, str) and not raw_index.strip().isdigit()):
+        return jsonify({
+            "ok": False,
+            "error": {"type": "move", "message": "尺码下标 index 必须为非负整数（从 0 计）"},
+        })
+    index = int(raw_index)
+
+    num_sizes = len(sizes)
+    swap_with = index - 1 if direction == "up" else index + 1
+    if not (0 <= index < num_sizes) or not (0 <= swap_with < num_sizes):
+        action = "上移" if direction == "up" else "下移"
+        return jsonify({
+            "ok": False,
+            "error": {"type": "move",
+                      "message": "尺码 {}（下标 {}）已在列表边缘，无法{}".format(
+                          sizes[index]["name"] if 0 <= index < num_sizes else index,
+                          index, action)},
+        })
+
+    pattern = data.get("pattern", "")
+    if not isinstance(pattern, str):
+        pattern = str(pattern)
+
+    # 相邻交换：新位置 j 的尺码来自原位置 perm[j]
+    perm = list(range(num_sizes))
+    perm[index], perm[swap_with] = perm[swap_with], perm[index]
+
+    raw_lines = pattern.splitlines(keepends=True)
+    new_lines = list(raw_lines)
+    for lineno, raw_line in enumerate(raw_lines, 1):
+        text = raw_line.strip()
+        if not text:  # 空行原样保留，行号仍按原始文本计算
+            continue
+        try:
+            # 先按当前尺码数解析：任何一行无法解析（含 *{...} 项数/数值非法）
+            # 时整次移动不生效
+            consumes, produces, _tallies = parse_row_details(text, num_sizes)
+        except ParseError as exc:
+            return jsonify({
+                "ok": False,
+                "error": _reorder_error(
+                    "reorder",
+                    "第 {} 行指令无法解析，尺码移动未生效：{}".format(lineno, str(exc)),
+                    lineno, exc),
+            })
+        try:
+            # 直接在原始行（含行首空白与换行符）上重排，非倍数原文逐字符保留
+            new_line = reorder_line_size_multipliers(raw_line, perm)
+            new_consumes, new_produces, _tallies = parse_row_details(
+                new_line, num_sizes)
+        except ParseError as exc:
+            return jsonify({
+                "ok": False,
+                "error": _reorder_error(
+                    "reorder",
+                    "第 {} 行按尺码倍数重排失败，尺码移动未生效：{}".format(
+                        lineno, str(exc)),
+                    lineno, exc),
+            })
+        # 复核：新行第 j 项的倍数来自原第 perm[j] 个尺码，故新行各尺码的
+        # 消耗/产出（按新顺序）必须等于移动前按 perm 取到的原针数——即
+        # 每个尺码重排后逐行针数与移动前完全一致
+        expected_consumes = [consumes[k] for k in perm]
+        expected_produces = [produces[k] for k in perm]
+        if (new_consumes != expected_consumes or
+                new_produces != expected_produces):
+            return jsonify({
+                "ok": False,
+                "error": _reorder_error(
+                    "reorder",
+                    "第 {} 行重排后针数与移动前不一致，尺码移动未生效".format(lineno),
+                    lineno),
+            })
+        new_lines[lineno - 1] = new_line
+
+    new_sizes = [sizes[k] for k in perm]
+    return jsonify({
+        "ok": True,
+        "sizes": new_sizes,
+        "pattern": ''.join(new_lines),
+        "from": index,
+        "to": swap_with,
     })
 
 

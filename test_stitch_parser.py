@@ -6,6 +6,7 @@ from stitch_parser import (
     parse_row_details,
     parse_row_sizes,
     parse_row_stitch_counts,
+    reorder_line_size_multipliers,
     suggest_row_fix,
 )
 
@@ -239,6 +240,92 @@ class TestSuggestRowFix(unittest.TestCase):
     def test_huge_multiplier_not_expanded(self):
         sug = suggest_row_fix('(k yo)*1000000000', [1000000001])
         self.assertEqual(sug['instruction'], '(k yo)*1000000001')
+
+
+class TestReorderLineSizeMultipliers(unittest.TestCase):
+    def test_simple_adjacent_swap(self):
+        # 3 个尺码，交换第 0、1 个：第 j 项取原 perm[j] 项
+        self.assertEqual(
+            reorder_line_size_multipliers('(k2tog yo)*{6|8|10}', [1, 0, 2]),
+            '(k2tog yo)*{8|6|10}')
+
+    def test_reverse_all(self):
+        self.assertEqual(
+            reorder_line_size_multipliers('k*{1|2|3}', [2, 1, 0]),
+            'k*{3|2|1}')
+
+    def test_multiple_braces_on_one_line(self):
+        self.assertEqual(
+            reorder_line_size_multipliers(
+                'k*{6|8|10} p*{1|2|3} yo', [1, 0, 2]),
+            'k*{8|6|10} p*{2|1|3} yo')
+
+    def test_nested_braces(self):
+        self.assertEqual(
+            reorder_line_size_multipliers(
+                '((k)*{1|2|3} yo)*{4|5|6} k*2', [2, 1, 0]),
+            '((k)*{3|2|1} yo)*{6|5|4} k*2')
+
+    def test_plain_multiplier_and_other_text_unchanged(self):
+        self.assertEqual(
+            reorder_line_size_multipliers(
+                '(k yo)*2 k*{1|2} p*3', [1, 0]),
+            '(k yo)*2 k*{2|1} p*3')
+
+    def test_line_without_braces_unchanged(self):
+        for text in ['k*3', '((k yo)*2 k2tog)*3', 'k p yo k2tog', '']:
+            self.assertEqual(
+                reorder_line_size_multipliers(text, [1, 0]), text)
+
+    def test_whitespace_and_line_ending_preserved(self):
+        # '*{' 内空白、行首行尾空白与换行符均逐字符保留，仅数字挪动
+        self.assertEqual(
+            reorder_line_size_multipliers('k*{6 | 8 | 10}\n', [1, 0, 2]),
+            'k*{8 | 6 | 10}\n')
+        self.assertEqual(
+            reorder_line_size_multipliers('  k*{12|16|20}  ', [2, 1, 0]),
+            '  k*{20|16|12}  ')
+
+    def test_single_size_permutation(self):
+        self.assertEqual(
+            reorder_line_size_multipliers('k*{5}', [0]), 'k*{5}')
+
+    def test_counts_follow_per_size_identity(self):
+        # 重排后新行第 j 项的针数 = 原行第 perm[j] 项的针数（每个尺码针数不变）
+        old = '(k2tog yo)*{6|8|10} k*{1|2|3}'
+        perm = [2, 0, 1]
+        new = reorder_line_size_multipliers(old, perm)
+        c0, p0 = parse_row_sizes(old, 3)
+        c1, p1 = parse_row_sizes(new, 3)
+        self.assertEqual(c1, [c0[k] for k in perm])
+        self.assertEqual(p1, [p0[k] for k in perm])
+
+    def test_wrong_item_count_reports_star_position(self):
+        with self.assertRaises(ParseError) as ctx:
+            reorder_line_size_multipliers('k*{6|8}', [1, 0, 2])
+        self.assertIn('项数不符', str(ctx.exception))
+        self.assertEqual(ctx.exception.pos, 1)  # '*' 下标
+
+    def test_zero_value_reports_digit_position(self):
+        with self.assertRaises(ParseError) as ctx:
+            reorder_line_size_multipliers('k*{6|0|2}', [1, 0, 2])
+        self.assertIn('正整数', str(ctx.exception))
+        self.assertEqual(ctx.exception.pos, 5)  # '0' 的下标
+
+    def test_missing_value_and_unclosed_brace(self):
+        for bad, pos in [('k*{6|}', 5), ('k*{6|8', 2)]:
+            with self.assertRaises(ParseError, msg=bad) as ctx:
+                reorder_line_size_multipliers(bad, [1, 0])
+            self.assertEqual(ctx.exception.pos, pos, msg=bad)
+
+    def test_bad_separator_reports_position(self):
+        with self.assertRaises(ParseError) as ctx:
+            reorder_line_size_multipliers('k*{6 2}', [1, 0])
+        self.assertEqual(ctx.exception.pos, 5)  # 第二个数字 '2'
+
+    def test_invalid_perm_raises_value_error(self):
+        with self.assertRaises(ValueError):
+            reorder_line_size_multipliers('k*{1|2}', [0, 0])
 
 
 if __name__ == '__main__':

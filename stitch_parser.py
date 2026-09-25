@@ -20,6 +20,11 @@ suggest_row_fix 为“可解析但至少一个尺码针数不符”的行推导�
 消耗关于任何一个倍数都是线性的，用 *1、*2 两次试算即可推出“基数 + 系数
 × 倍数”（嵌套重复同样只做算术推导，不展开），进而解出让各尺码消耗恰好
 等于可用针数的正整数倍数。
+
+reorder_line_size_multipliers 用于尺码上移/下移：给定“新位置 -> 原位置”
+的排列，重排一行中每一处 *{a|b|...} 的倍数项（嵌套重复与同一行多处都在
+内），普通 *n 与其他原文保持不变；任一处 *{...} 项数与尺码数不符或数值
+非法时抛出带行内字符位置的 ParseError。
 """
 
 import re
@@ -370,3 +375,96 @@ def suggest_row_fix(text, availables):
         if result is not None and (best is None or result[0] < best[0]):
             best = result
     return best[1] if best is not None else None
+
+
+def reorder_line_size_multipliers(text, perm):
+    """按尺码排列重排一行中所有 *{a|b|...} 的倍数项，返回新行原文。
+
+    perm 为长度等于尺码数的排列（“新位置 -> 原位置”的下标映射）：重排后
+    新行第 j 个倍数项取原行第 perm[j] 项。普通 *n 与其他所有原文（含空白
+    与大小写）逐字符保持不变；嵌套重复中的 *{...} 与同一行的多处 *{...}
+    都会被重排。任一处 *{...} 项数与尺码数不符或数值不是正整数时抛出
+    ParseError（pos 指向行内字符，供接口换算行号与字符位置）。
+    """
+    num_sizes = len(perm)
+    if num_sizes < 1:
+        raise ValueError("perm 不能为空")
+    if sorted(perm) != list(range(num_sizes)):
+        raise ValueError("perm 必须是 0..{} 的一个排列".format(num_sizes - 1))
+    tokens = _tokenize(text)
+    pieces = []
+    last_end = 0
+    i = 0
+    while i < len(tokens):
+        kind, _val, pos = tokens[i]
+        if kind != 'STAR':
+            i += 1
+            continue
+        nxt = tokens[i + 1] if i + 1 < len(tokens) else None
+        if nxt is None or nxt[0] != 'LBRACE':
+            # 普通 *n、孤立的 '*'：不属于按尺码倍数，原文整体保留
+            i += 1
+            continue
+        brace_pos = nxt[2]
+        nums = []
+        j = i + 2
+        expect_num = True
+        while True:
+            t = tokens[j] if j < len(tokens) else None
+            if expect_num:
+                if t is None:
+                    raise ParseError(
+                        "尺码倍数 '{{...}}' 未闭合，缺少右括号 '}}'"
+                        "（第 {} 个字符）".format(brace_pos + 1), brace_pos)
+                if t[0] == 'NUM':
+                    nums.append(t)
+                    expect_num = False
+                    j += 1
+                    continue
+                if t[0] == 'RBRACE':
+                    raise ParseError(
+                        "尺码倍数 '{{...}}' 中缺少正整数（第 {} 个字符）".format(
+                            t[2] + 1), t[2])
+                raise ParseError(
+                    "尺码倍数 '{{...}}' 中必须是正整数，收到 {!r}（第 {} 个字符）".format(
+                        t[1], t[2] + 1), t[2])
+            t = tokens[j] if j < len(tokens) else None
+            if t is None:
+                raise ParseError(
+                    "尺码倍数 '{{...}}' 缺少右括号 '}}'（第 {} 个字符）".format(
+                        brace_pos + 1), brace_pos)
+            if t[0] == 'PIPE':
+                expect_num = True
+                j += 1
+                continue
+            if t[0] == 'RBRACE':
+                rbrace = t
+                j += 1
+                break
+            raise ParseError(
+                "尺码倍数 '{{...}}' 的数字需用 '|' 分隔，收到 {!r}（第 {} 个字符）".format(
+                    t[1], t[2] + 1), t[2])
+        if len(nums) != num_sizes:
+            raise ParseError(
+                "尺码倍数项数不符：共 {} 个尺码，但倍数给出了 {} 个值（第 {} 个字符）".format(
+                    num_sizes, len(nums), pos + 1), pos)
+        for ntok in nums:
+            n = int(ntok[1])
+            if n <= 0:
+                raise ParseError(
+                    "倍数必须为正整数，收到 {}（第 {} 个字符）".format(
+                        n, ntok[2] + 1), ntok[2])
+        # 只移动数字本身：'*{'、'}'、竖线与空白等其余原文全部按原切片保留，
+        # 第 j 个槽位放入原第 perm[j] 个数字，槽位间沿用原第 j 段分隔文本
+        pieces.append(text[last_end:nums[0][2]])
+        for slot in range(num_sizes):
+            src = nums[perm[slot]]
+            pieces.append(text[src[2]:src[2] + len(src[1])])
+            if slot < num_sizes - 1:
+                pieces.append(text[nums[slot][2] + len(nums[slot][1]):
+                                   nums[slot + 1][2]])
+        pieces.append(text[nums[-1][2] + len(nums[-1][1]):rbrace[2] + 1])
+        last_end = rbrace[2] + 1
+        i = j
+    pieces.append(text[last_end:])
+    return ''.join(pieces)

@@ -49,6 +49,26 @@ function addSizeRow(name, castOn) {
   castOnInput.value = castOn === '' ? '' : String(castOn);
   castOnInput.required = true;
 
+  const moveGroup = document.createElement('div');
+  moveGroup.className = 'size-move';
+
+  const upBtn = document.createElement('button');
+  upBtn.type = 'button';
+  upBtn.className = 'move-size move-up';
+  upBtn.textContent = '↑';
+  upBtn.title = '上移该尺码（同步重排指令中的 *{...} 倍数项）';
+  upBtn.addEventListener('click', () => moveSizeRow(row, 'up'));
+
+  const downBtn = document.createElement('button');
+  downBtn.type = 'button';
+  downBtn.className = 'move-size move-down';
+  downBtn.textContent = '↓';
+  downBtn.title = '下移该尺码（同步重排指令中的 *{...} 倍数项）';
+  downBtn.addEventListener('click', () => moveSizeRow(row, 'down'));
+
+  moveGroup.appendChild(upBtn);
+  moveGroup.appendChild(downBtn);
+
   const removeBtn = document.createElement('button');
   removeBtn.type = 'button';
   removeBtn.className = 'remove-size';
@@ -61,6 +81,7 @@ function addSizeRow(name, castOn) {
 
   row.appendChild(nameInput);
   row.appendChild(castOnInput);
+  row.appendChild(moveGroup);
   row.appendChild(removeBtn);
   sizesList.appendChild(row);
   updateRemoveButtons();
@@ -68,8 +89,10 @@ function addSizeRow(name, castOn) {
 
 function updateRemoveButtons() {
   const rows = sizesList.querySelectorAll('.size-row');
-  rows.forEach((row) => {
+  rows.forEach((row, idx) => {
     row.querySelector('.remove-size').disabled = rows.length === 1;
+    row.querySelector('.move-up').disabled = idx === 0;
+    row.querySelector('.move-down').disabled = idx === rows.length - 1;
   });
 }
 
@@ -89,6 +112,55 @@ function readYarn() {
     waste_percent: yarnInputs.waste_percent.value,
     grams_per_ball: yarnInputs.grams_per_ball.value,
   };
+}
+
+// 尺码上移/下移：后端按尺码原顺序建立映射，重排指令中所有 *{...} 倍数项；
+// 任一处倍数项数/数值非法时整次移动不生效，错误带原文行号与字符位置。
+async function moveSizeRow(row, direction) {
+  const rows = Array.from(sizesList.querySelectorAll('.size-row'));
+  const index = rows.indexOf(row);
+  summaryBox.className = '';
+  summaryBox.textContent = '移动中…';
+  resultSection.hidden = false;
+
+  let data;
+  try {
+    const res = await fetch('/api/move-size', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sizes: readSizes(),
+        pattern: patternInput.value,
+        index,
+        direction,
+      }),
+    });
+    data = await res.json();
+  } catch (err) {
+    summaryBox.textContent = '请求失败：' + err.message;
+    summaryBox.className = 'error';
+    return;
+  }
+
+  if (!data.ok) {
+    // 整次移动未生效，保留当前输入；提示原文行号与字符位置（如有）
+    const err = data.error || {};
+    let msg = '尺码移动未生效：' + (err.message || '未知错误');
+    if (err.line != null) {
+      msg += '（第 ' + err.line + ' 行' + (err.char != null ? '，第 ' + err.char + ' 个字符' : '') + '）';
+    }
+    summaryBox.textContent = msg;
+    summaryBox.className = 'error';
+    return;
+  }
+
+  // 成功：按返回顺序重建尺码行，并整体替换指令文本后自动重新校验
+  sizesList.replaceChildren();
+  for (const s of data.sizes) {
+    addSizeRow(s.name, s.cast_on);
+  }
+  patternInput.value = data.pattern;
+  form.requestSubmit();
 }
 
 document.getElementById('add-size').addEventListener('click', () => {

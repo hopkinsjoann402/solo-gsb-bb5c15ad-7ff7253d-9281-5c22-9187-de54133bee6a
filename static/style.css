@@ -159,6 +159,23 @@ td:nth-child(2) {
   width: 120px;
 }
 
+.size-move {
+  display: flex;
+  gap: 4px;
+}
+
+.move-size {
+  padding: 8px 10px;
+  background: #8d8472;
+  line-height: 1;
+  font-size: 1rem;
+}
+
+.move-size:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
 .remove-size {
   padding: 8px 14px;
   background: #b0a48f;
