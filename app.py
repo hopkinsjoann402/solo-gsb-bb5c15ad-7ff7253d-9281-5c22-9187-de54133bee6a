@@ -25,6 +25,15 @@ POST /api/validate-sizes  多尺码校验（可附带线材用量估算）
   尺码列表或线材参数非法时:
     {"ok": false, "sizes": [], "error": {"type": "sizes"|"yarn", ...}}
 
+POST /api/move-size       尺码上移/下移，并同步重排指令中的按尺码倍数
+  请求: {"sizes": [...], "pattern": "...", "index": 0, "direction": "up"|"down"}
+  成功: {"ok": true, "sizes": 重排后的尺码列表, "pattern": 重排后的指令原文}
+    每行的 *{a|b|...} 按新尺码顺序重排（嵌套重复与同一行多处均处理），普通
+    *n 与其他原文保持不变。
+  失败: {"ok": false, "error": {"type": "sizes"|"move"|"reorder", ...}}
+    任一处按尺码倍数项数或数值不合法时整次移动不生效，reorder 错误带原文
+    行号 "line" 与字符位置 "char"（均从 1 计）。
+
 逐行推算规则：每个尺码独立地以上一行的产出作为下一行的可用针数；某尺码
 消耗与可用针数不一致（不足或超出）时，仅该尺码停止并记录行号与差额，
 其余尺码继续推算。指令本身无法解析（含 *{a|b} 项数与尺码数不符、倍数
@@ -56,6 +65,7 @@ from stitch_parser import (
     ParseError,
     parse_row,
     parse_row_details,
+    reorder_size_multipliers,
     suggest_row_fix,
 )
 
@@ -358,6 +368,89 @@ def validate_sizes():
         "sizes": result_sizes,
         "suggestion": suggestion,
     })
+
+
+@app.post("/api/move-size")
+def move_size():
+    """尺码上移/下移，并同步重排指令中所有 *{...} 的倍数项。
+
+    请求: {"sizes": [...], "pattern": "...", "index": 0, "direction": "up"|"down"}
+    成功: {"ok": true, "sizes": 重排后的尺码列表, "pattern": 重排后的指令原文}
+    失败: {"ok": false, "error": {"type": "sizes"|"move"|"reorder", ...}}
+      reorder 错误带 "line"（原文行号）与 "char"（字符位置，均从 1 计）；
+      此时尺码列表与指令均不改动，整次移动不生效。
+    """
+    data = request.get_json(silent=True) or {}
+
+    sizes, err = _parse_sizes(data.get("sizes"))
+    if err:
+        return jsonify({
+            "ok": False,
+            "error": {"line": None, "type": "sizes", "message": err},
+        })
+
+    index = data.get("index")
+    direction = data.get("direction")
+    if isinstance(index, bool) or not isinstance(index, int):
+        return jsonify({
+            "ok": False,
+            "error": {"line": None, "type": "move", "message": "缺少要移动的尺码位置"},
+        })
+    if direction not in ("up", "down"):
+        return jsonify({
+            "ok": False,
+            "error": {"line": None, "type": "move", "message": "移动方向必须是 up 或 down"},
+        })
+
+    target = index - 1 if direction == "up" else index + 1
+    if not (0 <= index < len(sizes)) or not (0 <= target < len(sizes)):
+        return jsonify({
+            "ok": False,
+            "error": {"line": None, "type": "move",
+                      "message": "该尺码已在边界，无法继续{}".format(
+                          "上移" if direction == "up" else "下移")},
+        })
+
+    pattern = data.get("pattern", "")
+    if not isinstance(pattern, str):
+        pattern = str(pattern)
+
+    num_sizes = len(sizes)
+    order = list(range(num_sizes))
+    order[index], order[target] = order[target], order[index]
+
+    line_ends = [(m.start(), m.end()) for m in re.finditer(r'\r\n|\r|\n', pattern)]
+    line_starts = [0] + [end for _start, end in line_ends]
+
+    new_lines = []
+    for lineno, start in enumerate(line_starts, 1):
+        end = line_ends[lineno - 1][0] if lineno - 1 < len(line_ends) else len(pattern)
+        line_text = pattern[start:end]
+        try:
+            new_lines.append(reorder_size_multipliers(line_text, order))
+        except ParseError as exc:
+            error = {
+                "line": lineno,
+                "type": "reorder",
+                "message": str(exc),
+            }
+            if getattr(exc, "pos", None) is not None:
+                error["char"] = exc.pos + 1
+            return jsonify({"ok": False, "error": error})
+
+    # 逐行重排后用原换行符拼回，保留原文其余字节不变
+    rebuilt = []
+    for lineno, new_text in enumerate(new_lines):
+        rebuilt.append(new_text)
+        if lineno < len(line_ends):
+            ls, le = line_ends[lineno]
+            rebuilt.append(pattern[ls:le])
+    new_pattern = "".join(rebuilt)
+
+    new_sizes = [None] * num_sizes
+    for new_idx, old_idx in enumerate(order):
+        new_sizes[new_idx] = sizes[old_idx]
+    return jsonify({"ok": True, "sizes": new_sizes, "pattern": new_pattern})
 
 
 def _yarn_summary(yarn, state):

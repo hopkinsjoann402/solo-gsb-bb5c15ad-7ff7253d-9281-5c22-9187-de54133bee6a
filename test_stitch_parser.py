@@ -6,6 +6,7 @@ from stitch_parser import (
     parse_row_details,
     parse_row_sizes,
     parse_row_stitch_counts,
+    reorder_size_multipliers,
     suggest_row_fix,
 )
 
@@ -239,6 +240,93 @@ class TestSuggestRowFix(unittest.TestCase):
     def test_huge_multiplier_not_expanded(self):
         sug = suggest_row_fix('(k yo)*1000000000', [1000000001])
         self.assertEqual(sug['instruction'], '(k yo)*1000000001')
+
+
+class TestReorderSizeMultipliers(unittest.TestCase):
+    def test_swap_first_two(self):
+        # order [1,0,2]：原 [A,B,C] 的新顺序为 [B,A,C]
+        self.assertEqual(
+            reorder_size_multipliers('(k2tog yo)*{6|8|10}', [1, 0, 2]),
+            '(k2tog yo)*{8|6|10}')
+
+    def test_move_first_down(self):
+        # order [2,0,1]：[A,B,C] -> [C,A,B]
+        self.assertEqual(
+            reorder_size_multipliers('k*{6|8|10}', [2, 0, 1]),
+            'k*{10|6|8}')
+
+    def test_multiple_sites_on_one_line(self):
+        # 同一行多处 *{...} 都要重排
+        self.assertEqual(
+            reorder_size_multipliers('k*{1|2|3} p*{4|5|6}', [2, 1, 0]),
+            'k*{3|2|1} p*{6|5|4}')
+
+    def test_nested_repeats_reordered(self):
+        # 内层按尺码倍数随尺码重排，外层普通 *2 不变
+        self.assertEqual(
+            reorder_size_multipliers('(k*{2|3|4} yo)*2', [1, 0, 2]),
+            '(k*{3|2|4} yo)*2')
+
+    def test_plain_repeat_and_other_text_unchanged(self):
+        text = '((k yo)*2 k2tog)*3 ssk*5'
+        self.assertEqual(reorder_size_multipliers(text, [2, 0, 1]), text)
+
+    def test_spaces_and_separators_preserved(self):
+        self.assertEqual(
+            reorder_size_multipliers('k*{ 6 | 8 | 10 }', [2, 0, 1]),
+            'k*{ 10 | 6 | 8 }')
+
+    def test_number_text_moved_as_is(self):
+        # 前导零等数字原文随尺码整体搬移，不重新规范化
+        self.assertEqual(
+            reorder_size_multipliers('k*{06|8|010}', [2, 1, 0]),
+            'k*{010|8|06}')
+
+    def test_line_without_size_repeat_is_identical(self):
+        text = 'plain line without any brace k p yo'
+        self.assertIs(reorder_size_multipliers(text, [2, 0, 1]) == text, True)
+
+    def test_single_size_swap_is_identity(self):
+        self.assertEqual(reorder_size_multipliers('k*{5} k*2', [0]), 'k*{5} k*2')
+
+    def test_count_mismatch_reports_star_position(self):
+        with self.assertRaises(ParseError) as ctx:
+            reorder_size_multipliers('k p*{6|8}', [2, 1, 0])
+        self.assertIn('项数不符', str(ctx.exception))
+        self.assertEqual(ctx.exception.pos, 3)  # '*' 的下标
+
+    def test_invalid_values_report_position(self):
+        cases = [
+            ('k*{0|2|3}', 3),    # 0 不是正整数，指向 '0'
+            ('k*{1|}', 5),       # 缺值，指向 '}'
+            ('k*{}', 3),         # 空括号，指向 '}'
+            ('k*{1|2', 2),       # 未闭合，指向 '{'
+            ('k*{1|a|3}', 5),    # 非法字符，指向 'a'
+            ('k*{1 2|3}', 5),    # 缺少 '|'，指向空格后的数字位置
+        ]
+        for text, pos in cases:
+            with self.assertRaises(ParseError, msg=text) as ctx:
+                reorder_size_multipliers(text, [2, 1, 0])
+            self.assertEqual(ctx.exception.pos, pos, msg=text)
+
+    def test_error_aborts_whole_line(self):
+        # 第一处合法、第二处非法时不返回部分重排结果
+        with self.assertRaises(ParseError):
+            reorder_size_multipliers('k*{1|2|3} k*{1|2}', [2, 1, 0])
+
+    def test_reordered_row_matches_permuted_parse(self):
+        # 重排后第 i 个尺码的针数 == 重排前第 order[i] 个尺码的针数
+        text = '(k2tog yo)*{6|8|10} p*{12|16|20} (k*{1|2|3})*{2|3|4}'
+        order = [2, 0, 1]
+        new_text = reorder_size_multipliers(text, order)
+        c_old, p_old = parse_row_sizes(text, 3)
+        c_new, p_new = parse_row_sizes(new_text, 3)
+        self.assertEqual(c_new, [c_old[i] for i in order])
+        self.assertEqual(p_new, [p_old[i] for i in order])
+
+    def test_invalid_order_raises_value_error(self):
+        with self.assertRaises(ValueError):
+            reorder_size_multipliers('k*{1|2|3}', [0, 0, 1])
 
 
 if __name__ == '__main__':

@@ -420,5 +420,149 @@ class TestValidateSizesSuggestion(unittest.TestCase):
         self.assertNotIn('suggestion', data)
 
 
+class TestMoveSizeApi(unittest.TestCase):
+    SIZES = [{'name': 'S', 'cast_on': 12},
+             {'name': 'M', 'cast_on': 16},
+             {'name': 'L', 'cast_on': 20}]
+    PATTERN = '\n'.join([
+        '(k2tog yo)*{6|8|10}',
+        'p*{12|16|20}',
+        '(k2tog)*{6|8|10}',
+        '(k2tog)*{3|4|5}',
+        'k*{3|4|5}',
+    ])
+
+    def setUp(self):
+        self.client = app.test_client()
+
+    def move(self, sizes, pattern, index, direction):
+        return self.client.post('/api/move-size', json={
+            'sizes': sizes, 'pattern': pattern,
+            'index': index, 'direction': direction,
+        }).get_json()
+
+    def validate(self, sizes, pattern):
+        return self.client.post('/api/validate-sizes', json={
+            'sizes': sizes, 'pattern': pattern,
+        }).get_json()
+
+    def _results_by_name(self, data):
+        return {s['name']: {
+            'ok': s['ok'],
+            'final': s['final'],
+            'error': None if s['error'] is None else (
+                s['error']['type'], s['error'].get('line'), s['error'].get('diff')),
+            'rows': [(r['line'], r['consume'], r['produce'], r['out']) for r in s['rows']],
+        } for s in data['sizes']}
+
+    def test_move_down_swaps_sizes_and_pattern(self):
+        # M 下移：[S,M,L] -> [S,L,M]
+        data = self.move(self.SIZES, self.PATTERN, 1, 'down')
+        self.assertTrue(data['ok'])
+        self.assertEqual([s['name'] for s in data['sizes']], ['S', 'L', 'M'])
+        self.assertEqual([s['cast_on'] for s in data['sizes']], [12, 20, 16])
+        self.assertEqual(data['pattern'].splitlines(), [
+            '(k2tog yo)*{6|10|8}',
+            'p*{12|20|16}',
+            '(k2tog)*{6|10|8}',
+            '(k2tog)*{3|5|4}',
+            'k*{3|5|4}',
+        ])
+
+    def test_move_up_swaps_sizes_and_pattern(self):
+        # L 上移：[S,M,L] -> [S,L,M]
+        data = self.move(self.SIZES, self.PATTERN, 2, 'up')
+        self.assertTrue(data['ok'])
+        self.assertEqual([s['name'] for s in data['sizes']], ['S', 'L', 'M'])
+        self.assertEqual(data['pattern'].splitlines()[0], '(k2tog yo)*{6|10|8}')
+
+    def test_plain_repeats_and_text_unchanged(self):
+        pattern = '((k yo)*2 k2tog)*3\nk*{3|4|5} tail k*9\n'
+        data = self.move(self.SIZES, pattern, 0, 'down')
+        self.assertTrue(data['ok'])
+        self.assertEqual(data['pattern'].splitlines()[0], '((k yo)*2 k2tog)*3')
+        self.assertEqual(data['pattern'].splitlines()[1], 'k*{4|3|5} tail k*9')
+        self.assertTrue(data['pattern'].endswith('\n'))
+
+    def test_nested_and_multiple_sites_per_line(self):
+        pattern = '(k*{2|3|4} yo)*2 p*{5|6|7}'
+        data = self.move(self.SIZES, pattern, 0, 'down')
+        self.assertTrue(data['ok'])
+        self.assertEqual(data['pattern'], '(k*{3|2|4} yo)*2 p*{6|5|7}')
+
+    def test_crlf_and_blank_lines_preserved(self):
+        pattern = 'k*{1|2|3}\r\n\r\np*{4|5|6}'
+        data = self.move(self.SIZES, pattern, 2, 'up')
+        self.assertTrue(data['ok'])
+        self.assertEqual(data['pattern'], 'k*{1|3|2}\r\n\r\np*{4|6|5}')
+
+    def test_validation_results_identical_after_move(self):
+        # 重排后各尺码重新校验的针数与移动前一致（按尺码名对照）
+        before = self._results_by_name(self.validate(self.SIZES, self.PATTERN))
+        moved = self.move(self.SIZES, self.PATTERN, 0, 'down')
+        after = self._results_by_name(
+            self.validate(moved['sizes'], moved['pattern']))
+        self.assertEqual(before, after)
+
+    def test_results_identical_with_count_errors(self):
+        # 移动前 M 在第 2 行针数出错；移动后按名字对照结果仍一致
+        sizes = [{'name': 'S', 'cast_on': 4},
+                 {'name': 'M', 'cast_on': 6},
+                 {'name': 'L', 'cast_on': 8}]
+        pattern = 'k*{4|6|8}\n(k yo)*{4|5|8}\nk*{8|1|16}'
+        before = self._results_by_name(self.validate(sizes, pattern))
+        moved = self.move(sizes, pattern, 0, 'down')  # -> [M,S,L]
+        after = self._results_by_name(
+            self.validate(moved['sizes'], moved['pattern']))
+        self.assertEqual(before, after)
+        self.assertEqual(moved['pattern'], 'k*{6|4|8}\n(k yo)*{5|4|8}\nk*{1|8|16}')
+
+    def test_count_mismatch_blocks_whole_move(self):
+        # 第 2 行倍数只有 2 项：整次移动不生效（无 sizes/pattern 回写）
+        pattern = 'k*{6|8|10}\np*{12|16}\n'
+        data = self.move(self.SIZES, pattern, 0, 'down')
+        self.assertFalse(data['ok'])
+        self.assertNotIn('sizes', data)
+        self.assertNotIn('pattern', data)
+        err = data['error']
+        self.assertEqual(err['type'], 'reorder')
+        self.assertEqual(err['line'], 2)
+        self.assertEqual(err['char'], 2)
+        self.assertIn('项数不符', err['message'])
+
+    def test_bad_value_blocks_whole_move(self):
+        pattern = 'k*{6|0|10}'
+        data = self.move(self.SIZES, pattern, 2, 'up')
+        self.assertFalse(data['ok'])
+        err = data['error']
+        self.assertEqual(err['type'], 'reorder')
+        self.assertEqual(err['line'], 1)
+        self.assertEqual(err['char'], 6)  # '0' 是第 6 个字符
+        self.assertIn('正整数', err['message'])
+
+    def test_invalid_sizes_rejected(self):
+        data = self.move([], 'k*1', 0, 'up')
+        self.assertFalse(data['ok'])
+        self.assertEqual(data['error']['type'], 'sizes')
+
+    def test_boundary_and_bad_direction_rejected(self):
+        for index, direction in [(0, 'up'), (2, 'down')]:
+            data = self.move(self.SIZES, self.PATTERN, index, direction)
+            self.assertFalse(data['ok'], msg=(index, direction))
+            self.assertEqual(data['error']['type'], 'move')
+        data = self.move(self.SIZES, self.PATTERN, 1, 'sideways')
+        self.assertFalse(data['ok'])
+        self.assertEqual(data['error']['type'], 'move')
+        data = self.move(self.SIZES, self.PATTERN, 9, 'up')
+        self.assertFalse(data['ok'])
+        self.assertEqual(data['error']['type'], 'move')
+
+    def test_single_size_move_is_boundary_error(self):
+        sizes = [{'name': 'S', 'cast_on': 4}]
+        data = self.move(sizes, 'k*{4}', 0, 'up')
+        self.assertFalse(data['ok'])
+        self.assertEqual(data['error']['type'], 'move')
+
+
 if __name__ == '__main__':
     unittest.main()

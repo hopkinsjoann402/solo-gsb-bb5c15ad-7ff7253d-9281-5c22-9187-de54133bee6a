@@ -165,9 +165,34 @@ td:nth-child(2) {
   line-height: 1;
 }
 
+.move-size {
+  padding: 8px 12px;
+  background: #b0a48f;
+  line-height: 1;
+}
+
+.move-size:disabled,
 .remove-size:disabled {
   opacity: 0.4;
   cursor: default;
+}
+
+/* 尺码上移/下移的结果或错误提示 */
+.move-message {
+  margin-bottom: 8px;
+  padding: 8px 12px;
+  border-radius: 6px;
+  font-size: 0.92rem;
+}
+
+.move-message.ok {
+  background: #e0efdd;
+  color: #2e6b2e;
+}
+
+.move-message.error {
+  background: #f8e1e1;
+  color: #a33;
 }
 
 button.small {

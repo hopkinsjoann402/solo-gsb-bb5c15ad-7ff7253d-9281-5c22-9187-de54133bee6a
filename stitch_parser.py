@@ -20,6 +20,11 @@ suggest_row_fix 为“可解析但至少一个尺码针数不符”的行推导�
 消耗关于任何一个倍数都是线性的，用 *1、*2 两次试算即可推出“基数 + 系数
 × 倍数”（嵌套重复同样只做算术推导，不展开），进而解出让各尺码消耗恰好
 等于可用针数的正整数倍数。
+
+reorder_size_multipliers 在尺码顺序调整（上移/下移）时，按新顺序重排一行
+中所有 *{a|b|...} 的倍数项：嵌套重复与同一行多处都会处理，普通 *n 与其他
+原文保持不变；任一处项数或数值不合法时抛 ParseError 并给出字符位置，调用
+方可据此中止整次移动。
 """
 
 import re
@@ -370,3 +375,83 @@ def suggest_row_fix(text, availables):
         if result is not None and (best is None or result[0] < best[0]):
             best = result
     return best[1] if best is not None else None
+
+
+def reorder_size_multipliers(text, order):
+    """按新尺码顺序重排一行中每个 *{a|b|...} 的倍数项，返回重排后的行。
+
+    order 为长度等于尺码数的下标排列（0 起）：新顺序中第 i 项取自原顺序
+    第 order[i] 项。普通 *n 与其余原文（含空白、分隔符）原样保留；
+    *{...} 中的数值文本（含前导零等）按原文本整体搬移，嵌套重复与同一行
+    多处倍数都会处理。任一处 *{...} 项数与尺码数不符或数值非法（0、缺失、
+    无法识别的字符、括号未闭合等）时抛 ParseError 并给出字符位置，使整次
+    移动可以整体中止。
+    """
+    n = len(order)
+    if sorted(order) != list(range(n)):
+        raise ValueError("order 必须是 0..尺码数-1 的一个排列")
+
+    edits = []  # (数字在原文中的 (起始, 结束), 搬移来的数字文本)
+    pos = 0
+    while pos < len(text):
+        if text[pos] != '*':
+            pos += 1
+            continue
+        j = pos + 1
+        # 与解析器一致：'*' 与倍数之间允许空白或逗号
+        while j < len(text) and (text[j].isspace() or text[j] == ','):
+            j += 1
+        if j >= len(text) or text[j] != '{':
+            pos = j if j > pos + 1 else pos + 1
+            continue
+        brace_pos = j
+        k = j + 1
+        spans = []
+        while True:
+            while k < len(text) and text[k].isspace():
+                k += 1
+            start = k
+            while k < len(text) and text[k].isdigit():
+                k += 1
+            if k == start:
+                if k >= len(text):
+                    raise ParseError(
+                        "尺码倍数 '{{...}}' 未闭合，缺少正整数（第 {} 个字符）".format(
+                            brace_pos + 1), brace_pos)
+                raise ParseError(
+                    "尺码倍数 '{{...}}' 中必须是正整数，收到 {!r}（第 {} 个字符）".format(
+                        text[k], k + 1), k)
+            value = int(text[start:k])
+            if value <= 0:
+                raise ParseError(
+                    "倍数必须为正整数，收到 {}（第 {} 个字符）".format(value, start + 1), start)
+            spans.append((start, k))
+            while k < len(text) and text[k].isspace():
+                k += 1
+            if k < len(text) and text[k] == '|':
+                k += 1
+                continue
+            if k < len(text) and text[k] == '}':
+                k += 1
+                break
+            if k >= len(text):
+                raise ParseError(
+                    "尺码倍数 '{{...}}' 缺少右括号 '}}'（第 {} 个字符）".format(
+                        brace_pos + 1), brace_pos)
+            raise ParseError(
+                "尺码倍数 '{{...}}' 的数字需用 '|' 分隔，收到 {!r}（第 {} 个字符）".format(
+                    text[k], k + 1), k)
+        if len(spans) != n:
+            raise ParseError(
+                "尺码倍数项数不符：共 {} 个尺码，但倍数给出了 {} 个值（第 {} 个字符）".format(
+                    n, len(spans), pos + 1), pos)
+        for new_idx, (s, e) in enumerate(spans):
+            src_s, src_e = spans[order[new_idx]]
+            edits.append(((s, e), text[src_s:src_e]))
+        pos = k
+
+    # 各段互不重叠且按位置升序，倒序替换即可保持下标有效
+    result = text
+    for (s, e), replacement in reversed(edits):
+        result = result[:s] + replacement + result[e:]
+    return result

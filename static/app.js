@@ -6,6 +6,7 @@ const patternInput = document.getElementById('pattern');
 const resultSection = document.getElementById('result');
 const summaryBox = document.getElementById('summary');
 const sizesResults = document.getElementById('sizes-results');
+const moveMessage = document.getElementById('move-message');
 const yarnInputs = {
   k: document.getElementById('yarn-k'),
   p: document.getElementById('yarn-p'),
@@ -49,6 +50,20 @@ function addSizeRow(name, castOn) {
   castOnInput.value = castOn === '' ? '' : String(castOn);
   castOnInput.required = true;
 
+  const upBtn = document.createElement('button');
+  upBtn.type = 'button';
+  upBtn.className = 'move-size move-up';
+  upBtn.textContent = '↑';
+  upBtn.title = '上移该尺码（指令中的按尺码倍数同步重排）';
+  upBtn.addEventListener('click', () => moveSize(row, 'up'));
+
+  const downBtn = document.createElement('button');
+  downBtn.type = 'button';
+  downBtn.className = 'move-size move-down';
+  downBtn.textContent = '↓';
+  downBtn.title = '下移该尺码（指令中的按尺码倍数同步重排）';
+  downBtn.addEventListener('click', () => moveSize(row, 'down'));
+
   const removeBtn = document.createElement('button');
   removeBtn.type = 'button';
   removeBtn.className = 'remove-size';
@@ -56,20 +71,25 @@ function addSizeRow(name, castOn) {
   removeBtn.title = '删除该尺码';
   removeBtn.addEventListener('click', () => {
     row.remove();
-    updateRemoveButtons();
+    updateRowButtons();
+    hideMoveMessage();
   });
 
   row.appendChild(nameInput);
   row.appendChild(castOnInput);
+  row.appendChild(upBtn);
+  row.appendChild(downBtn);
   row.appendChild(removeBtn);
   sizesList.appendChild(row);
-  updateRemoveButtons();
+  updateRowButtons();
 }
 
-function updateRemoveButtons() {
+function updateRowButtons() {
   const rows = sizesList.querySelectorAll('.size-row');
-  rows.forEach((row) => {
+  rows.forEach((row, i) => {
     row.querySelector('.remove-size').disabled = rows.length === 1;
+    row.querySelector('.move-up').disabled = i === 0;
+    row.querySelector('.move-down').disabled = i === rows.length - 1;
   });
 }
 
@@ -93,7 +113,74 @@ function readYarn() {
 
 document.getElementById('add-size').addEventListener('click', () => {
   addSizeRow('', '');
+  hideMoveMessage();
 });
+
+function showMoveMessage(text, ok) {
+  moveMessage.textContent = text;
+  moveMessage.className = 'move-message ' + (ok ? 'ok' : 'error');
+  moveMessage.hidden = false;
+}
+
+function hideMoveMessage() {
+  moveMessage.hidden = true;
+  moveMessage.textContent = '';
+}
+
+async function moveSize(row, direction) {
+  const rows = Array.from(sizesList.querySelectorAll('.size-row'));
+  const index = rows.indexOf(row);
+  if (index < 0) {
+    return;
+  }
+  hideMoveMessage();
+
+  let data;
+  try {
+    const res = await fetch('/api/move-size', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        sizes: readSizes(),
+        pattern: patternInput.value,
+        index,
+        direction,
+      }),
+    });
+    data = await res.json();
+  } catch (err) {
+    showMoveMessage('移动请求失败：' + err.message, false);
+    return;
+  }
+
+  if (!data.ok) {
+    // 整次移动不生效：尺码列表与指令原文都不改动
+    showMoveMessage(formatMoveError(data.error), false);
+    updateRowButtons();
+    return;
+  }
+
+  sizesList.replaceChildren();
+  for (const s of data.sizes) {
+    addSizeRow(s.name, s.cast_on);
+  }
+  patternInput.value = data.pattern;
+  const dirText = direction === 'up' ? '上移' : '下移';
+  showMoveMessage(
+    '已' + dirText + '尺码，指令中的 *{...} 倍数项已按新顺序同步重排。', true);
+  form.requestSubmit();  // 移动后自动重新校验：各尺码针数与移动前一致
+}
+
+function formatMoveError(err) {
+  if (!err) {
+    return '移动失败：未知错误';
+  }
+  if (err.type === 'reorder') {
+    const where = '第 ' + err.line + ' 行第 ' + err.char + ' 个字符';
+    return '移动未生效：' + where + ' 的按尺码倍数不合法——' + err.message;
+  }
+  return '移动未生效：' + err.message;
+}
 
 document.getElementById('fill-example').addEventListener('click', () => {
   sizesList.replaceChildren();
@@ -101,7 +188,10 @@ document.getElementById('fill-example').addEventListener('click', () => {
     addSizeRow(s.name, s.cast_on);
   }
   patternInput.value = EXAMPLE_PATTERN;
+  hideMoveMessage();
 });
+
+patternInput.addEventListener('input', hideMoveMessage);
 
 form.addEventListener('submit', async (event) => {
   event.preventDefault();

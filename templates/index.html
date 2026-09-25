@@ -27,11 +27,18 @@
       （改动的尺码项数最少、倍数变化最小者优先），建议显示在错误行的尺码卡片中，
       可一键替换并重新校验。
     </p>
+    <p class="hint">
+      用尺码行右侧的 <code>↑</code>/<code>↓</code> 按钮可上移、下移尺码：指令中每一处
+      <code>*{a|b|c}</code> 的倍数项会按新尺码顺序同步重排（嵌套重复、同一行多处均生效），
+      普通 <code>*n</code> 与其他原文不变；若某处按尺码倍数项数或数值不合法，整次移动不生效，
+      并提示原文行号与字符位置。
+    </p>
 
     <form id="check-form">
       <div class="field">
         <span>尺码与起针数（按顺序，<code>*{...}</code> 依此顺序取值）</span>
         <div id="sizes-list"></div>
+        <div id="move-message" class="move-message" hidden></div>
         <button type="button" id="add-size" class="small">＋ 添加尺码</button>
       </div>
 
